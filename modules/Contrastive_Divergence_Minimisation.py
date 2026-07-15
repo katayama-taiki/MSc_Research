@@ -61,30 +61,18 @@ class ExponentialFamilyModel(nn.Module):
         # 統計量とパラメータの内積を計算（エネルギーの計算などに使用）
         return torch.matmul(stats, self.theta)
 
-def contrastive_divergence_step(model, optimizer, pos_stats, neg_stats):
-    """
-    1ステップ分のCDMを実行する関数
-    pos_stats: 実データから計算した十分統計量 X^0
-    neg_stats: MCMC等でモデルからサンプリングしたデータから計算した十分統計量 X^1
-    """
-    # 1. 期待値（バッチ方向の平均）を計算
-    # スライドの <d log f(x) / d theta>_X^0 と _X^1 に相当
-    pos_mean = pos_stats.mean(dim=0)
-    neg_mean = neg_stats.mean(dim=0)
-    
-    # 2. 勾配の固定（定数化）
-    # .detach() をつけることで、PyTorchの計算グラフから切り離し、単なる定数ベクトルにする
-    grad_constant = (pos_mean - neg_mean).detach()
-    
-    # 3. 疑似ロス (Surrogate Loss) の定義
-    # L = - (pos_mean - neg_mean) * Θ
-    # この L を Θ で微分すると、ちょうど -(pos_mean - neg_mean) になる
-    surrogate_loss = -torch.dot(model.theta, grad_constant)
-    
-    # 4. パラメータの更新
-    # PyTorchは Θ_t - η * (勾配) を実行するので、結果的にスライドの式と完全に一致する
-    optimizer.zero_grad()
-    surrogate_loss.backward()
-    optimizer.step()
-    
-    return surrogate_loss.item()
+    def contrastive_divergence_step(self, optimizer, pos_stats, neg_stats):
+        """
+        クラス内部でCDMの1ステップを完結させるメソッド
+        """
+        pos_mean = pos_stats.mean(dim=0)
+        neg_mean = neg_stats.mean(dim=0)
+        
+        grad_constant = (pos_mean - neg_mean).detach()
+        surrogate_loss = -torch.dot(self.theta, grad_constant)
+        
+        optimizer.zero_grad()
+        surrogate_loss.backward()
+        optimizer.step()
+        
+        return surrogate_loss.item()
