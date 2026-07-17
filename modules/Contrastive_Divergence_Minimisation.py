@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from itertools import combinations
 
 class InteractionSufficientStatistics:
@@ -54,20 +55,83 @@ class InteractionSufficientStatistics:
 class ExponentialFamilyModel(nn.Module):
     def __init__(self, stats_dim):
         super().__init__()
-        # パラメータ Θ は十分統計量と全く同じ次元のベクトル
         self.theta = nn.Parameter(torch.zeros(stats_dim))
 
-    def forward(self, stats):
-        # 統計量とパラメータの内積を計算（エネルギーの計算などに使用）
-        return torch.matmul(stats, self.theta)
-
-    def contrastive_divergence_step(self, optimizer, pos_stats, neg_stats):
+    def sample_T_given_S(self, S_batch, calc_stats_fn, k):
         """
-        クラス内部でCDMの1ステップを完結させるメソッド
+        現在のパラメータ θ に基づき、条件付き分布 p(T|S; θ) から T をサンプリングする。
         """
-        pos_mean = pos_stats.mean(dim=0)
-        neg_mean = neg_stats.mean(dim=0)
+        batch_size = S_batch.shape[0]
+        num_classes = 10
+        device = S_batch.device
         
+        energies = []
+        
+        # MCMCのサンプリング時は勾配計算をオフにし、メモリを節約
+        with torch.no_grad():
+            for c in range(num_classes):
+                T_dummy = torch.zeros(batch_size, num_classes, device=device)
+                T_dummy[:, c] = 1.0
+                
+                stats_c = calc_stats_fn(T_dummy, S_batch)[k]
+                energy_c = torch.matmul(stats_c, self.theta)
+                energies.append(energy_c)
+                
+            energies_tensor = torch.stack(energies, dim=1) # (batch, 10)
+            
+            # 確率 p(T|S) を計算
+            p_T_given_S = F.softmax(energies_tensor, dim=1)
+            
+            # カテゴリカル分布から T をサンプリング (MCMCステップ)
+            sampled_class_indices = torch.multinomial(p_T_given_S, num_samples=1).squeeze()
+            
+            # サンプルされた T をワンホットベクトルに変換
+            T_sampled = F.one_hot(sampled_class_indices, num_classes=10).float()
+            
+        return T_sampled
+
+    def compute_negative_stats_mean(self, S_batch, calc_stats_fn, k):
+        """
+        [完全解析版]
+        10クラスすべての十分統計量を計算し、Softmax確率で重み付けた期待値を厳密に算出する。
+        """
+        batch_size = S_batch.shape[0]
+        num_classes = 10
+        device = S_batch.device
+        
+        stats_all_classes = []
+        energies = []
+        
+        # 1. 10クラスすべての統計量とエネルギー E_k(T=c, S) を計算
+        for c in range(num_classes):
+            T_dummy = torch.zeros(batch_size, num_classes, device=device)
+            T_dummy[:, c] = 1.0
+            
+            stats_c = calc_stats_fn(T_dummy, S_batch)[k]
+            stats_all_classes.append(stats_c)
+            
+            energy_c = torch.matmul(stats_c, self.theta)
+            energies.append(energy_c)
+            
+        energies_tensor = torch.stack(energies, dim=1) # (batch, 10)
+        
+        # 2. 条件付き確率 p(T|S) をSoftmaxで計算
+        p_T_given_S = F.softmax(energies_tensor, dim=1)
+        
+        # 3. 確率で重み付けして期待値 E_{p(T|S)}[\phi(T, S)] を計算
+        expected_stats = torch.zeros_like(stats_all_classes[0])
+        for c in range(num_classes):
+            prob_c = p_T_given_S[:, c].unsqueeze(1) # ブロードキャスト用の次元追加
+            expected_stats += prob_c * stats_all_classes[c]
+            
+        # 最後にミニバッチ方向での平均をとる E_{p_data(S)}[...]
+        return expected_stats.mean(dim=0)
+
+    def contrastive_divergence_step(self, optimizer, pos_mean, neg_mean):
+        """
+        実データのサンプル平均と、MCMCサンプルの平均の差からパラメータを更新する
+        """
+        # 勾配 = <φ>_data - <φ>_model
         grad_constant = (pos_mean - neg_mean).detach()
         surrogate_loss = -torch.dot(self.theta, grad_constant)
         
