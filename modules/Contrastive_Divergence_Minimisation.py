@@ -14,7 +14,6 @@ class InteractionSufficientStatistics:
 
     def _update_combinations(self, num_sources):
         if self._cached_num_sources != num_sources:
-            # ソース変数の数と max_order の小さい方を上限とする
             limit_order = min(self.max_order, num_sources)
             self._combinations_by_order = {
                 k: list(combinations(range(num_sources), k)) 
@@ -30,24 +29,17 @@ class InteractionSufficientStatistics:
         num_sources = S.shape[1]
         self._update_combinations(num_sources)
         
-        cumulative_stats = []
-        stats_for_models = {}
+        # 修正箇所: 0次項(T単独)を初期状態として格納
+        cumulative_stats = [T] 
+        stats_for_models = {0: T}
         
-        # キャッシュされた次数（最大 max_order まで）の範囲でループ
         for k in self._combinations_by_order.keys():
             order_k_stats = []
             for idx in self._combinations_by_order[k]:
-                # ソース変数の積を計算 (batch_size, 1)
                 interaction_term = S[:, idx].prod(dim=1, keepdim=True)
-                
-                # ワンホットT と掛け合わせる
-                # ブロードキャストにより (batch_size, num_classes) に拡張される
                 order_k_stats.append(T * interaction_term)
             
-            # k次のみの組み合わせテンソルを結合 (batch_size, num_classes * k次の組み合わせ数)
             cumulative_stats.append(torch.cat(order_k_stats, dim=1))
-            
-            # 1次からk次までを累積的に結合して辞書に格納
             stats_for_models[k] = torch.cat(cumulative_stats, dim=1)
             
         return stats_for_models
